@@ -6,6 +6,13 @@ import torch.nn.functional as F
 import torchvision
 import matplotlib.pyplot as plt
 from livelossplot import PlotLosses
+#http://cs231n.stanford.edu/slides/2017/cs231n_2017_lecture9.pdf
+
+from torch.autograd import Variable
+from torchvision import transforms
+import torch.optim as optim
+
+from util import *
 
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
@@ -51,32 +58,72 @@ for i in range(25):
 class MyNetwork(nn.Module):
     def __init__(self):
         super(MyNetwork, self).__init__()
-        layers = nn.ModuleList()
-        layers.append(nn.Linear(in_features=3*32*32, out_features=512))
-        layers.append(nn.ReLU())
-        layers.append(nn.Linear(in_features=512, out_features=100))
-        self.layers = layers
+        "block1"
+        self.conv1 = nn.Conv2d(3, 16, 3)#inc channel 3->10, decrease the h,w size -3
+        self.bn1 = nn.BatchNorm2d(16)
+        self.conv2 = nn.Conv2d(16, 32, 3)
+        self.subResConv=nn.Conv2d(3, 32, 5)
+        self.subResbn=nn.BatchNorm2d(32)
+        self.pool = nn.MaxPool2d(2, 2)#doesnt touch channel, decrease the h,w size -2
+
+        "block2"
+        self.conv3 = nn.Conv2d(32, 64, 3)
+        self.bn3 = nn.BatchNorm2d(64)
+        self.conv4 = nn.Conv2d(64, 128, 3)
+        self.subResConv2=nn.Conv2d(32, 128, 5)
+        self.subResbn2=nn.BatchNorm2d(128)
+
+        "last"
+        self.conv5 = nn.Conv2d(128, 256, 3)
+        self.bn5 = nn.BatchNorm2d(256)
+
+        self.fc1 = nn.Linear(in_features=256*3*3, out_features=512)
+        self.fc2 = nn.Linear(in_features=512, out_features=100)
 
     def forward(self, x):
-        x = x.view(x.size(0), -1) # flatten input as we're using linear layers
-        for m in self.layers:
-            x = m(x)
+        "block1" #F.relu()
+        residual = x
+        out = F.elu(self.bn1(self.conv1(x)+self.conv1(x)))
+        out = F.elu(self.conv2(out))
+        x = self.pool(self.subResbn(self.subResConv(residual)+out)) #residual
+
+        "block2"
+        residual = x
+        out = F.elu(self.bn3(self.conv3(x)+self.conv3(x)))
+        out = F.elu(self.conv4(out)+self.conv4(out))
+        out=F.dropout(out, p=0.5, training=True)
+        x = self.pool(self.subResbn2(self.subResConv2(residual)+out)) #residual
+
+
+        x = F.relu(self.bn5(self.conv5(x)))#EXPLODING GRADIANTSSS
+        x = x.view(x.size(0), -1)
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
         return x
+
+
 
 N = MyNetwork().to(device)
 
 print(f'> Number of network parameters {len(torch.nn.utils.parameters_to_vector(N.parameters()))}')
 
 # initialise the optimiser
-optimiser = torch.optim.SGD(N.parameters(), lr=0.001)
+# optimiser = torch.optim.SGD(N.parameters(), lr=0.001)
+
+lr=0.01#0.05
+optimiser = torch.optim.ASGD(N.parameters(), lr=lr, weight_decay=0.001)
 epoch = 0
-liveplot = PlotLosses()
+# liveplot = PlotLosses()
 
 
+listOfAccu=[]
+lrCounterOfDec=0
+lrCounterOfInc=0
 
+# criterion=nn.CrossEntropyLoss()
 
-while (epoch<10):
-
+while (epoch<30):#10
+    N = N.train()
     # arrays for metrics
     logs = {}
     train_loss_arr = np.zeros(0)
@@ -85,7 +132,7 @@ while (epoch<10):
     test_acc_arr = np.zeros(0)
 
     # iterate over some of the train dateset
-    for i in range(1000):
+    for i in range(5000):#1000
         x,t = next(train_iterator)
         x,t = x.to(device), t.to(device)
 
@@ -99,6 +146,7 @@ while (epoch<10):
         train_loss_arr = np.append(train_loss_arr, loss.cpu().data)
         train_acc_arr = np.append(train_acc_arr, pred.data.eq(t.view_as(pred)).float().mean().item())
 
+    N = N.eval()
     # iterate entire test dataset
     for x,t in test_loader:
         x,t = x.to(device), t.to(device)
@@ -110,60 +158,64 @@ while (epoch<10):
         test_loss_arr = np.append(test_loss_arr, loss.cpu().data)
         test_acc_arr = np.append(test_acc_arr, pred.data.eq(t.view_as(pred)).float().mean().item())
 
-    # NOTE: live plot library has dumb naming forcing our 'test' to be called 'validation'
-    # liveplot.update({
-        # 'accuracy': train_acc_arr.mean(),
-        # 'val_accuracy': test_acc_arr.mean(),
-        # 'loss': train_loss_arr.mean(),
-        # 'val_loss': test_loss_arr.mean()
-    # })
-    # liveplot.draw()
 
+    testacccc=round(test_acc_arr.mean()*100,2)
     resultsStr="""
     epoch_"""+str(epoch)+""":
             'train accuracy': """+str(round(train_acc_arr.mean()*100,2))+"""%,
-            'val accuracy': """+str(round(test_acc_arr.mean()*100,2))+"""%,
+            'val accuracy': """+str(testacccc)+"""%,
             'loss': """+str(round(train_loss_arr.mean(),2))+""",
             'val_loss': """+str(round(test_loss_arr.mean(),2))+"""
     --------------------------------------------------------------
     """
     print(resultsStr)
+
+
+    if epoch>7:
+        # print("isworking?",testacccc-listOfAccu[-1]<0.5 and lrCounterOfDec==1,testacccc-listOfAccu[-1]<0.5,lrCounterOfDec==1)
+        if testacccc-listOfAccu[-1]<0.5 and lrCounterOfDec==1:
+            lrCounterOfDec=0
+            lrCounterOfInc=0
+            lr-=lr*0.5
+            print("DECREASED lrDec",lr)
+            optimiser = torch.optim.ASGD(N.parameters(), lr=lr, weight_decay=0.001)
+        elif testacccc-listOfAccu[-1] and lrCounterOfInc==3:
+            lrCounterOfDec=0
+            lrCounterOfInc=0
+            lr+=lr*0.3
+            print("INCREASED lrInc",lr)
+            optimiser = torch.optim.ASGD(N.parameters(), lr=lr, weight_decay=0.001)
+        elif testacccc-listOfAccu[-1]<0.5:
+            lrCounterOfDec+=1
+            lrCounterOfInc=0
+            print("D:",lrCounterOfDec,"I:",lrCounterOfInc)
+        elif testacccc-listOfAccu[-1]>=0.5:
+            lrCounterOfDec=0
+            lrCounterOfInc+=1
+            print("D:",lrCounterOfDec,"I:",lrCounterOfInc)
+
+
+
+    listOfAccu.append(testacccc)
+
+    if testacccc>50:#46
+        torch.save(N, "./v"+str(round(test_acc_arr.mean()*100,2))+"_t"+str(round(train_acc_arr.mean()*100,2))+"_e"+str(epoch)+".m")
+    # elif testacccc<37 and epoch==10:
+    #     raise SystemExit(0)
+    # elif testacccc<42 and epoch==14:
+    #     raise SystemExit(0)
+
+    # if round(train_acc_arr.mean()*100,2)-round(test_acc_arr.mean()*100,2)>3:
+
+
     epoch = epoch+1
 
-
-
-def plot_image(i, predictions_array, true_label, img):
-    predictions_array, true_label, img = predictions_array[i], true_label[i], img[i]
-    plt.grid(False)
-    plt.xticks([])
-    plt.yticks([])
-
-    plt.imshow(img, cmap=plt.cm.binary)
-
-    predicted_label = np.argmax(predictions_array)
-    color = '#335599' if predicted_label == true_label else '#ee4433'
-
-    plt.xlabel("{} {:2.0f}% ({})".format(class_names[predicted_label],
-                                  100*np.max(predictions_array),
-                                  class_names[true_label]),
-                                  color=color)
-
-def plot_value_array(i, predictions_array, true_label):
-    predictions_array, true_label = predictions_array[i], true_label[i]
-    plt.grid(False)
-    plt.xticks([])
-    plt.yticks([])
-    thisplot = plt.bar(range(len(class_names)), predictions_array, color="#777777")
-    plt.ylim([0, 1])
-    predicted_label = np.argmax(predictions_array)
-
-    thisplot[predicted_label].set_color('#ee4433')
-    thisplot[true_label].set_color('#335599')
-
+    #49.62
 test_images, test_labels = next(test_iterator)
 test_images, test_labels = test_images.to(device), test_labels.to(device)
-test_preds = torch.nn.functional.softmax(N(test_images).view(test_images.size(0), len(class_names)), dim=1).data.squeeze().cpu().numpy()
+test_preds = F.softmax(N(test_images).view(test_images.size(0), len(class_names)), dim=1).data.squeeze().cpu().numpy()
 
+#torch.nn.functional
 num_rows = 4
 num_cols = 4
 num_images = num_rows*num_cols
